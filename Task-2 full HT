@@ -1,0 +1,206 @@
+
+import os
+import glob
+import random
+import numpy as np
+import pandas as pd
+from sklearn.metrics import (
+    accuracy_score, precision_recall_fscore_support, classification_report
+)
+
+random.seed(42)
+np.random.seed(42)
+
+UPLOAD_DIR = "/mnt/user-data/uploads"
+
+
+
+def load_kaggle_csv():
+    csvs = glob.glob(os.path.join(UPLOAD_DIR, "*.csv"))
+    for path in csvs:
+        try:
+            df = pd.read_csv(path, encoding="latin1")
+        except Exception:
+            continue
+        cols = {c.lower().strip(): c for c in df.columns}
+        if "sentence #" in cols and "word" in cols and ("pos" in cols or "tag" in cols):
+            sent_col, word_col = cols["sentence #"], cols["word"]
+            tag_col = cols.get("pos", cols.get("tag"))
+            df[sent_col] = df[sent_col].ffill()
+            sentences = []
+            for _, group in df.groupby(sent_col, sort=False):
+                sent = list(zip(group[word_col].astype(str).str.lower(),
+                                 group[tag_col].astype(str)))
+                if sent:
+                    sentences.append(sent)
+            print(f"Loaded Kaggle dataset: {path}  ({len(sentences)} sentences)")
+            return sentences
+    return None
+
+
+def generate_synthetic_corpus(n_sentences=4000):
+    """Penn-Treebank-tagset synthetic corpus (used only if no Kaggle CSV is uploaded)."""
+    vocab = {
+        "DT": ["the", "a", "an", "this", "that", "these", "those"],
+        "NN": ["dog", "cat", "man", "woman", "city", "book", "market", "school",
+               "car", "river", "garden", "phone", "table", "student", "teacher"],
+        "NNS": ["dogs", "cats", "men", "women", "cities", "books", "cars", "students"],
+        "NNP": ["John", "Mary", "India", "Google", "London", "Sara", "Chennai"],
+        "PRP": ["he", "she", "it", "they", "we", "i", "you"],
+        "VBZ": ["runs", "eats", "sees", "likes", "plays", "reads", "writes"],
+        "VBD": ["ran", "ate", "saw", "liked", "played", "read", "wrote", "went"],
+        "VBG": ["running", "eating", "seeing", "liking", "playing", "reading"],
+        "VB": ["run", "eat", "see", "like", "play", "read", "write", "go"],
+        "MD": ["will", "can", "should", "must", "would", "may"],
+        "JJ": ["quick", "lazy", "big", "small", "happy", "bright", "old", "new", "good"],
+        "RB": ["quickly", "slowly", "happily", "very", "often", "always", "never"],
+        "IN": ["in", "on", "at", "under", "over", "with", "near", "into", "of"],
+        "CC": ["and", "but", "or", "so"],
+        "CD": ["one", "two", "three", "ten", "twenty", "100"],
+        "TO": ["to"],
+        ".": [".", "!", "?"],
+    }
+    templates = [
+        ["DT", "JJ", "NN", "VBZ", "IN", "DT", "NN", "."],
+        ["NNP", "VBD", "DT", "NN", "."],
+        ["PRP", "VBZ", "DT", "JJ", "NN", "."],
+        ["DT", "NN", "MD", "VB", "RB", "."],
+        ["PRP", "VBD", "TO", "DT", "NN", "."],
+        ["NNP", "AND_NNP", "VBD", "IN", "DT", "NN", "."],
+        ["DT", "NNS", "VBZ", "JJ", "."],
+        ["PRP", "VBD", "DT", "JJ", "NN", "CC", "DT", "NN", "."],
+        ["NNP", "VBZ", "CD", "NNS", "."],
+        ["DT", "NN", "VBG", "IN", "DT", "NN", "."],
+    ]
+
+    def sample(tag):
+        if tag == "AND_NNP":
+            return random.choice(vocab["CC"]), "CC", random.choice(vocab["NNP"]), "NNP"
+        return random.choice(vocab[tag]), tag
+
+    sentences = []
+    for _ in range(n_sentences):
+        template = random.choice(templates)
+        sent = []
+        for tag in template:
+            if tag == "AND_NNP":
+                w1, t1, w2, t2 = sample(tag)
+                sent.append((w1, t1))
+                sent.append((w2, t2))
+            else:
+                w, t = sample(tag)
+                sent.append((w, t))
+        sentences.append(sent)
+    return sentences
+
+
+sentences = load_kaggle_csv()
+if sentences is None:
+    print("No Kaggle CSV found in /mnt/user-data/uploads -> using synthetic tagged corpus instead.")
+    sentences = generate_synthetic_corpus()
+
+random.shuffle(sentences)
+split = int(0.8 * len(sentences))
+train_sents, test_sents = sentences[:split], sentences[split:]
+print(f"Train sentences: {len(train_sents)} | Test sentences: {len(test_sents)}")
+
+
+
+tags = sorted({tag for sent in train_sents for _, tag in sent})
+tag2idx = {t: i for i, t in enumerate(tags)}
+N = len(tags)
+
+words = sorted({w for sent in train_sents for w, _ in sent})
+word2idx = {w: i for i, w in enumerate(words)}
+word2idx["<UNK>"] = len(word2idx)
+V = len(word2idx)
+
+K = 0.1  # smoothing constant
+
+initial_counts = np.zeros(N)
+transition_counts = np.zeros((N, N))
+emission_counts = np.zeros((N, V))
+
+for sent in train_sents:
+    first_tag = sent[0][1]
+    initial_counts[tag2idx[first_tag]] += 1
+    for i, (word, tag) in enumerate(sent):
+        ti = tag2idx[tag]
+        wi = word2idx.get(word, word2idx["<UNK>"])
+        emission_counts[ti, wi] += 1
+        if i > 0:
+            prev_tag = sent[i - 1][1]
+            transition_counts[tag2idx[prev_tag], ti] += 1
+
+initial_prob = (initial_counts + K) / (initial_counts.sum() + K * N)
+transition_prob = (transition_counts + K) / (transition_counts.sum(axis=1, keepdims=True) + K * N)
+emission_prob = (emission_counts + K) / (emission_counts.sum(axis=1, keepdims=True) + K * V)
+
+
+
+log_initial = np.log(initial_prob)
+log_transition = np.log(transition_prob)
+log_emission = np.log(emission_prob)
+
+
+def viterbi_decode(word_seq):
+    T = len(word_seq)
+    obs_idx = np.array([word2idx.get(w, word2idx["<UNK>"]) for w in word_seq])
+
+    dp = np.zeros((T, N))
+    backptr = np.zeros((T, N), dtype=int)
+
+    dp[0] = log_initial + log_emission[:, obs_idx[0]]
+
+    for t in range(1, T):
+        # scores[prev_tag, curr_tag] = dp[t-1][prev_tag] + log_transition[prev_tag, curr_tag]
+        scores = dp[t - 1][:, None] + log_transition          # (N, N), vectorized over all states
+        backptr[t] = np.argmax(scores, axis=0)                # best prev tag for each curr tag
+        dp[t] = np.max(scores, axis=0) + log_emission[:, obs_idx[t]]
+
+    path = [int(np.argmax(dp[-1]))]
+    for t in range(T - 1, 0, -1):
+        path.append(int(backptr[t, path[-1]]))
+    path.reverse()
+
+    return [tags[i] for i in path]
+
+
+
+y_true, y_pred = [], []
+for sent in test_sents:
+    word_seq = [w for w, _ in sent]
+    true_tags = [t for _, t in sent]
+    pred_tags = viterbi_decode(word_seq)
+    y_true.extend(true_tags)
+    y_pred.extend(pred_tags)
+
+
+
+acc = accuracy_score(y_true, y_pred)
+prec, rec, f1, _ = precision_recall_fscore_support(y_true, y_pred, average="weighted", zero_division=0)
+
+print("\n===== EVALUATION =====")
+print(f"Accuracy : {acc:.4f}")
+print(f"Precision: {prec:.4f}")
+print(f"Recall   : {rec:.4f}")
+print(f"F1-score : {f1:.4f}")
+print("\nClassification Report:")
+print(classification_report(y_true, y_pred, zero_division=0))
+
+
+unseen_sentences = [
+    "the quick fox runs into the garden",
+    "she will read a new book",
+    "john and mary played happily in the park",
+    "the students write a report quickly",
+    "he can see the bright river",
+]
+
+print("\n===== UNSEEN SENTENCE PREDICTIONS =====")
+for s in unseen_sentences:
+    tokens = s.lower().replace(".", " .").split()
+    pred = viterbi_decode(tokens)
+    print(f"\nSentence: {s}")
+    for w, t in zip(tokens, pred):
+        print(f"  {w:12s} -> {t}")
