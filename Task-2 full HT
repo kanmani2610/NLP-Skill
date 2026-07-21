@@ -11,12 +11,12 @@ from sklearn.metrics import (
 random.seed(42)
 np.random.seed(42)
 
-UPLOAD_DIR = "/mnt/user-data/uploads"
+UPLOAD_DIR = "pos_tags.csv"
 
 
 
 def load_kaggle_csv():
-    csvs = glob.glob(os.path.join(UPLOAD_DIR, "*.csv"))
+    csvs = glob.glob(os.path.join(pos_tags, "*.csv"))
     for path in csvs:
         try:
             df = pd.read_csv(path, encoding="latin1")
